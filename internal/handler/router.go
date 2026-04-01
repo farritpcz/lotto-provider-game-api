@@ -39,12 +39,16 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+
 	"github.com/farritpcz/lotto-provider-game-api/internal/middleware"
 )
 
 type Handler struct {
 	LaunchTokenSecret string
+	DB                *gorm.DB // inject จาก main.go
 }
+
 
 func NewHandler(launchTokenSecret string) *Handler {
 	return &Handler{LaunchTokenSecret: launchTokenSecret}
