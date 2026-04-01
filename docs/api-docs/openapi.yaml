@@ -1,0 +1,470 @@
+openapi: 3.0.3
+info:
+  title: Lotto Provider Game API
+  description: |
+    API สำหรับ iGaming platforms เชื่อมต่อระบบหวยออนไลน์ (คล้าย PG/JILI)
+
+    ## Authentication
+
+    ### Operator API (Server-to-Server)
+    ทุก request ต้องมี headers:
+    - `X-API-Key`: API Key ที่ได้จาก provider admin
+    - `X-Signature`: HMAC-SHA256(body + timestamp, secret_key)
+    - `X-Timestamp`: Unix timestamp (ไม่เก่ากว่า 5 นาที)
+
+    ### Game Client API (Player)
+    Player ได้ launch token จาก `/api/v1/games/launch`
+    ส่งผ่าน query `?token=xxx` หรือ header `X-Launch-Token`
+
+    ## Wallet Integration
+    รองรับ 2 แบบ:
+    - **Seamless**: Provider เรียก operator wallet API ทุกครั้ง
+    - **Transfer**: Player โอนเงินเข้า provider ก่อน แล้วเล่นจาก balance ใน provider
+  version: 1.0.0
+  contact:
+    name: Lotto Provider Support
+
+servers:
+  - url: http://localhost:9080
+    description: Development
+
+tags:
+  - name: Wallet - Seamless
+    description: Seamless wallet API (operator เรียก)
+  - name: Wallet - Transfer
+    description: Transfer wallet API (operator โอนเงินเข้า/ออก)
+  - name: Games
+    description: Game management + launch
+  - name: Results
+    description: ผลรางวัล
+  - name: Reports
+    description: รายงาน
+  - name: Game Client
+    description: API สำหรับ player ใน game client (iframe)
+
+paths:
+  /api/v1/wallet/balance:
+    post:
+      tags: [Wallet - Seamless]
+      summary: ดึงยอดเงินของ player
+      security: [{hmac: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [player_id]
+              properties:
+                player_id:
+                  type: string
+                  example: "player_001"
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BalanceResponse'
+
+  /api/v1/wallet/debit:
+    post:
+      tags: [Wallet - Seamless]
+      summary: หักเงินจาก player (ตอนวางเดิมพัน)
+      security: [{hmac: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [player_id, amount, txn_id]
+              properties:
+                player_id:
+                  type: string
+                amount:
+                  type: number
+                  example: 100
+                txn_id:
+                  type: string
+                  description: Unique transaction ID (ป้องกัน duplicate)
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BalanceResponse'
+
+  /api/v1/wallet/credit:
+    post:
+      tags: [Wallet - Seamless]
+      summary: เติมเงินให้ player (ตอนชนะรางวัล)
+      security: [{hmac: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [player_id, amount, txn_id]
+              properties:
+                player_id:
+                  type: string
+                amount:
+                  type: number
+                txn_id:
+                  type: string
+      responses:
+        '200':
+          description: Success
+
+  /api/v1/wallet/deposit:
+    post:
+      tags: [Wallet - Transfer]
+      summary: โอนเงินเข้า provider (Transfer mode)
+      security: [{hmac: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [player_id, amount]
+              properties:
+                player_id:
+                  type: string
+                amount:
+                  type: number
+
+  /api/v1/wallet/withdraw:
+    post:
+      tags: [Wallet - Transfer]
+      summary: โอนเงินออกจาก provider (Transfer mode)
+      security: [{hmac: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [player_id, amount]
+              properties:
+                player_id:
+                  type: string
+                amount:
+                  type: number
+
+  /api/v1/games:
+    get:
+      tags: [Games]
+      summary: รายการหวยทั้งหมด
+      security: [{hmac: []}]
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LotteryType'
+
+  /api/v1/games/{id}/rounds:
+    get:
+      tags: [Games]
+      summary: รอบที่เปิดรับแทงของหวยประเภทนั้น
+      security: [{hmac: []}]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Success
+
+  /api/v1/games/launch:
+    post:
+      tags: [Games]
+      summary: สร้าง Game URL สำหรับ player เข้าเล่น
+      description: |
+        Operator เรียก API นี้ → ได้ URL + token → ส่ง URL ให้ player เปิดใน iframe
+
+        Token อายุ 60 นาที. Player เปิด URL → game client โหลด → เล่นหวยได้ทันที
+      security: [{hmac: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [player_id]
+              properties:
+                player_id:
+                  type: string
+                  description: ID ผู้เล่นฝั่ง operator
+                  example: "player_001"
+                game_code:
+                  type: string
+                  description: "ถ้าระบุ → เปิดหน้าเกมนั้นตรง, ไม่ระบุ → เปิด lobby"
+                  example: "YEEKEE"
+                currency:
+                  type: string
+                  example: "THB"
+                language:
+                  type: string
+                  example: "th"
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      url:
+                        type: string
+                        description: URL สำหรับ player เปิดใน iframe
+                        example: "https://game.lotto.com/launch?token=eyJ..."
+                      token:
+                        type: string
+                        description: Launch token (JWT)
+                      player_id:
+                        type: string
+                      expires:
+                        type: integer
+                        description: Unix timestamp ที่ token หมดอายุ
+
+  /api/v1/results:
+    get:
+      tags: [Results]
+      summary: ดูผลรางวัลล่าสุด
+      security: [{hmac: []}]
+
+  /api/v1/reports/bets:
+    get:
+      tags: [Reports]
+      summary: รายงานการเดิมพัน
+      security: [{hmac: []}]
+      parameters:
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+
+  /api/v1/game/lobby:
+    get:
+      tags: [Game Client]
+      summary: รายการหวยสำหรับ player
+      security: [{launchToken: []}]
+
+  /api/v1/game/rounds/{typeId}:
+    get:
+      tags: [Game Client]
+      summary: รอบที่เปิดรับแทง
+      security: [{launchToken: []}]
+      parameters:
+        - name: typeId
+          in: path
+          required: true
+          schema:
+            type: integer
+
+  /api/v1/game/bets:
+    post:
+      tags: [Game Client]
+      summary: วางเดิมพัน
+      security: [{launchToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bets]
+              properties:
+                bets:
+                  type: array
+                  items:
+                    type: object
+                    required: [lottery_round_id, bet_type_code, number, amount]
+                    properties:
+                      lottery_round_id:
+                        type: integer
+                      bet_type_code:
+                        type: string
+                        enum: [3TOP, 3TOD, 2TOP, 2BOTTOM, RUN_TOP, RUN_BOT]
+                      number:
+                        type: string
+                        example: "847"
+                      amount:
+                        type: number
+                        example: 100
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      success_count:
+                        type: integer
+                      total_amount:
+                        type: number
+                      balance_after:
+                        type: number
+                      errors:
+                        type: array
+                        items:
+                          type: object
+
+    get:
+      tags: [Game Client]
+      summary: ดู bets ของฉัน
+      security: [{launchToken: []}]
+
+  /api/v1/game/results:
+    get:
+      tags: [Game Client]
+      summary: ตรวจผลรางวัล
+      security: [{launchToken: []}]
+
+  /api/v1/game/history:
+    get:
+      tags: [Game Client]
+      summary: ประวัติการแทง
+      security: [{launchToken: []}]
+
+  /api/v1/game/balance:
+    get:
+      tags: [Game Client]
+      summary: ดูยอดเงิน
+      security: [{launchToken: []}]
+
+  /api/v1/game/yeekee/ws/{roundId}:
+    get:
+      tags: [Game Client]
+      summary: WebSocket สำหรับยี่กี real-time
+      description: |
+        WebSocket endpoint สำหรับยิงเลขยี่กี
+
+        **Send:** `{"type":"shoot","data":{"number":"12345"}}`
+
+        **Receive:**
+        - `shoot_broadcast` — เลขที่คนอื่นยิง
+        - `countdown` — เวลาที่เหลือ
+        - `result` — ผลยี่กี
+      security: [{launchToken: []}]
+      parameters:
+        - name: roundId
+          in: path
+          required: true
+          schema:
+            type: integer
+
+components:
+  securitySchemes:
+    hmac:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        HMAC Authentication:
+        1. ส่ง `X-API-Key` header
+        2. ส่ง `X-Signature`: HMAC-SHA256(body + timestamp, secret_key)
+        3. ส่ง `X-Timestamp`: Unix timestamp
+    launchToken:
+      type: apiKey
+      in: header
+      name: X-Launch-Token
+      description: JWT launch token จาก /api/v1/games/launch
+
+  schemas:
+    BalanceResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            balance:
+              type: number
+            player_id:
+              type: string
+            txn_id:
+              type: string
+
+    LotteryType:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+          example: "หวยไทย (ใต้ดิน)"
+        code:
+          type: string
+          enum: [THAI, LAO, STOCK_TH, STOCK_FOREIGN, YEEKEE]
+        category:
+          type: string
+        description:
+          type: string
+        icon:
+          type: string
+        status:
+          type: string
+
+    Callback:
+      type: object
+      description: |
+        Provider จะ callback ไปยัง operator เมื่อมี event:
+
+        **POST {callback_url}/bet-result**
+        ```json
+        {
+          "player_id": "ext123",
+          "round_id": "20260401-01",
+          "bet_id": "12345",
+          "number": "847",
+          "bet_type": "3TOP",
+          "amount": 100,
+          "status": "won",
+          "win_amount": 90000,
+          "timestamp": "2026-04-01T15:30:00Z"
+        }
+        ```
+
+        **POST {callback_url}/round-start**
+        ```json
+        {
+          "event": "round_start",
+          "round_id": "20260401-01",
+          "game_code": "THAI",
+          "timestamp": "2026-04-01T08:00:00Z"
+        }
+        ```
