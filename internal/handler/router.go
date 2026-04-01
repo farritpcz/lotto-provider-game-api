@@ -59,9 +59,13 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 	{
 		// === Operator API (HMAC Auth) ===
 		// Operator เรียกจาก server ของตัวเอง
-		// ⭐ ใช้ HMACAuthWithDB — ตรวจ API key + signature + IP whitelist จาก DB จริง
+		// ⭐ Operator API security chain:
+		// 1. HMACAuthWithDB: API key + signature + IP whitelist
+		// 2. RateLimitMiddleware: 100 req/s per operator, burst 200
+		limiter := middleware.NewRateLimiter(100, 200)
 		operator := api.Group("")
 		operator.Use(middleware.HMACAuthWithDB(h.DB))
+		operator.Use(middleware.RateLimitMiddleware(limiter))
 		{
 			// Wallet — Seamless
 			operator.POST("/wallet/balance", h.SeamlessBalance)
