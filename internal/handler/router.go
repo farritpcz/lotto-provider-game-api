@@ -59,8 +59,9 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 	{
 		// === Operator API (HMAC Auth) ===
 		// Operator เรียกจาก server ของตัวเอง
+		// ⭐ ใช้ HMACAuthWithDB — ตรวจ API key + signature + IP whitelist จาก DB จริง
 		operator := api.Group("")
-		operator.Use(middleware.HMACAuth())
+		operator.Use(middleware.HMACAuthWithDB(h.DB))
 		{
 			// Wallet — Seamless
 			operator.POST("/wallet/balance", h.SeamlessBalance)
@@ -83,8 +84,9 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 
 		// === Game Client API (Launch Token Auth) ===
 		// Player เล่นผ่าน game client iframe (#8)
+		// ⭐ ใช้ LaunchTokenAuthWithSecret — parse JWT token จริง → ได้ member_id + operator_id
 		game := api.Group("/game")
-		game.Use(middleware.LaunchTokenAuth(h.LaunchTokenSecret))
+		game.Use(middleware.LaunchTokenAuthWithSecret(h.LaunchTokenSecret))
 		{
 			game.GET("/lobby", h.GameLobby)
 			game.GET("/rounds/:typeId", h.GameRounds)

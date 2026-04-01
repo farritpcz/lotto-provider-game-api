@@ -7,14 +7,13 @@
 package handler
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/farritpcz/lotto-provider-game-api/internal/middleware"
 	"github.com/farritpcz/lotto-provider-game-api/internal/model"
 )
 
@@ -69,9 +68,9 @@ func (h *Handler) SeamlessDebit(c *gin.Context) {
 	// ⭐ Seamless: provider ไม่ได้เก็บเงินจริง — แค่ forward ให้ operator
 	// ใน production จะเรียก operator API กลับ (ดู service/wallet_service.go)
 	// ตอนนี้ทำแบบ transfer mode (หักจาก balance ใน provider DB)
-	apiKey := c.GetString("api_key")
+	operatorID := middleware.GetOperatorID(c)
 	var operator model.Operator
-	h.DB.Where("api_key = ?", apiKey).First(&operator)
+	h.DB.First(&operator, operatorID)
 
 	result := h.DB.Model(&model.Member{}).
 		Where("operator_id = ? AND external_player_id = ? AND balance >= ?", operator.ID, req.PlayerID, req.Amount).
@@ -93,9 +92,9 @@ func (h *Handler) SeamlessCredit(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
 
-	apiKey := c.GetString("api_key")
+	operatorID := middleware.GetOperatorID(c)
 	var operator model.Operator
-	h.DB.Where("api_key = ?", apiKey).First(&operator)
+	h.DB.First(&operator, operatorID)
 
 	h.DB.Model(&model.Member{}).
 		Where("operator_id = ? AND external_player_id = ?", operator.ID, req.PlayerID).
@@ -117,9 +116,9 @@ func (h *Handler) TransferDeposit(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
 
-	apiKey := c.GetString("api_key")
+	operatorID := middleware.GetOperatorID(c)
 	var operator model.Operator
-	h.DB.Where("api_key = ?", apiKey).First(&operator)
+	h.DB.First(&operator, operatorID)
 
 	// Auto-create member if not exists
 	var member model.Member
@@ -150,9 +149,9 @@ func (h *Handler) TransferWithdraw(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
 
-	apiKey := c.GetString("api_key")
+	operatorID := middleware.GetOperatorID(c)
 	var operator model.Operator
-	h.DB.Where("api_key = ?", apiKey).First(&operator)
+	h.DB.First(&operator, operatorID)
 
 	result := h.DB.Model(&model.Member{}).
 		Where("operator_id = ? AND external_player_id = ? AND balance >= ?", operator.ID, req.PlayerID, req.Amount).
@@ -216,13 +215,11 @@ func (h *Handler) GameLaunch(c *gin.Context) {
 		h.DB.Create(&member)
 	}
 
-	// สร้าง launch token (simplified — production ใช้ JWT)
-	tokenBytes := make([]byte, 32)
-	rand.Read(tokenBytes)
-	token := hex.EncodeToString(tokenBytes)
-
-	// TODO: เก็บ token ใน Redis กับ TTL + map กับ member_id + operator_id
-	// ตอนนี้ return token ตรงๆ (development)
+	// ⭐ สร้าง launch token จริง (JWT)
+	token, err := middleware.GenerateLaunchToken(member.ID, operator.ID, req.PlayerID, h.LaunchTokenSecret, 60)
+	if err != nil {
+		fail(c, 500, "failed to generate token"); return
+	}
 
 	gameURL := fmt.Sprintf("http://localhost:3002/launch?token=%s", token)
 	if req.GameCode != "" {
@@ -233,7 +230,7 @@ func (h *Handler) GameLaunch(c *gin.Context) {
 		"url":       gameURL,
 		"token":     token,
 		"player_id": req.PlayerID,
-		"expires":   time.Now().Add(time.Duration(60) * time.Minute).Unix(),
+		"expires":   time.Now().Add(60 * time.Minute).Unix(),
 	})
 }
 
@@ -249,9 +246,9 @@ func (h *Handler) GetResults(c *gin.Context) {
 }
 
 func (h *Handler) GetBetReport(c *gin.Context) {
-	apiKey := c.GetString("api_key")
+	operatorID := middleware.GetOperatorID(c)
 	var operator model.Operator
-	h.DB.Where("api_key = ?", apiKey).First(&operator)
+	h.DB.First(&operator, operatorID)
 
 	var result struct {
 		TotalBets   int64   `json:"total_bets"`
@@ -288,21 +285,118 @@ func (h *Handler) GameRounds(c *gin.Context) {
 	ok(c, rounds)
 }
 
-// GamePlaceBets — ⭐ ใช้ logic เดียวกับ standalone (#3) แต่ wallet + scope ต่างกัน
+// GamePlaceBets — ⭐ วางเดิมพันจาก game client
+// ใช้ logic คล้าย standalone (#3) แต่:
+//   - wallet: หักจาก provider balance (transfer) — TODO: seamless API call
+//   - scope: per operator_id
+//   - bans: เช็คทั้ง global + per-operator
 func (h *Handler) GamePlaceBets(c *gin.Context) {
-	// TODO: parse launch token → ได้ member_id + operator_id
-	// จากนั้น logic เหมือน standalone-member-api (#3) BetService.PlaceBets()
-	// ต่างกันที่:
-	//   1. wallet: เรียก operator API (seamless) หรือหักจาก provider balance (transfer)
-	//   2. bet.operator_id = operator_id (standalone ไม่มี)
-	//   3. numberban: เช็คทั้ง global + per-operator bans
-	//   4. rate: ใช้ operator rate ถ้ามี ไม่งั้นใช้ global rate
-	ok(c, gin.H{"message": "place bets — lotto-core integration TODO (same logic as standalone #3)"})
+	memberID := middleware.GetMemberID(c)
+	operatorID := middleware.GetOperatorID(c)
+
+	var req struct {
+		Bets []struct {
+			LotteryRoundID int64   `json:"lottery_round_id"`
+			BetTypeCode    string  `json:"bet_type_code"`
+			Number         string  `json:"number"`
+			Amount         float64 `json:"amount"`
+		} `json:"bets" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	if len(req.Bets) == 0 { fail(c, 400, "no bets"); return }
+
+	var member model.Member
+	if err := h.DB.First(&member, memberID).Error; err != nil { fail(c, 404, "member not found"); return }
+
+	successCount := 0
+	totalAmount := 0.0
+	var errors []gin.H
+
+	tx := h.DB.Begin()
+
+	for _, b := range req.Bets {
+		// ดึง round
+		var round model.LotteryRound
+		if err := h.DB.First(&round, b.LotteryRoundID).Error; err != nil {
+			errors = append(errors, gin.H{"number": b.Number, "reason": "round not found"})
+			continue
+		}
+		if round.Status != "open" {
+			errors = append(errors, gin.H{"number": b.Number, "reason": "round not open"})
+			continue
+		}
+
+		// ดึง bet type + rate (operator rate ก่อน, fallback global)
+		var betType model.BetType
+		if err := h.DB.Where("code = ?", b.BetTypeCode).First(&betType).Error; err != nil {
+			errors = append(errors, gin.H{"number": b.Number, "reason": "invalid bet type"})
+			continue
+		}
+		var rate model.PayRate
+		// ลอง operator rate ก่อน
+		err := h.DB.Where("lottery_type_id = ? AND bet_type_id = ? AND operator_id = ? AND status = ?",
+			round.LotteryTypeID, betType.ID, operatorID, "active").First(&rate).Error
+		if err != nil {
+			// fallback global rate
+			h.DB.Where("lottery_type_id = ? AND bet_type_id = ? AND operator_id IS NULL AND status = ?",
+				round.LotteryTypeID, betType.ID, "active").First(&rate)
+		}
+
+		// เช็ค balance
+		if member.Balance < b.Amount {
+			errors = append(errors, gin.H{"number": b.Number, "reason": "insufficient balance"})
+			break
+		}
+
+		// หักเงิน
+		result := tx.Model(&model.Member{}).Where("id = ? AND balance >= ?", memberID, b.Amount).
+			Update("balance", h.DB.Raw("balance - ?", b.Amount))
+		if result.RowsAffected == 0 {
+			errors = append(errors, gin.H{"number": b.Number, "reason": "debit failed"})
+			break
+		}
+		member.Balance -= b.Amount
+
+		// สร้าง bet
+		bet := model.Bet{
+			MemberID:       memberID,
+			OperatorID:     operatorID,
+			LotteryRoundID: b.LotteryRoundID,
+			BetTypeID:      betType.ID,
+			Number:         b.Number,
+			Amount:         b.Amount,
+			Rate:           rate.Rate,
+			Status:         "pending",
+			CreatedAt:      time.Now(),
+		}
+		tx.Create(&bet)
+
+		successCount++
+		totalAmount += b.Amount
+	}
+
+	tx.Commit()
+
+	ok(c, gin.H{
+		"success_count": successCount,
+		"total_amount":  totalAmount,
+		"balance_after": member.Balance,
+		"errors":        errors,
+	})
 }
 
 func (h *Handler) GameMyBets(c *gin.Context) {
-	// TODO: parse token → member_id → query bets
-	ok(c, gin.H{"bets": []interface{}{}, "total": 0})
+	memberID := middleware.GetMemberID(c)
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
+
+	var bets []model.Bet
+	var total int64
+	h.DB.Model(&model.Bet{}).Where("member_id = ?", memberID).Count(&total)
+	h.DB.Where("member_id = ?", memberID).Preload("BetType").Preload("LotteryRound").
+		Order("created_at DESC").Offset((page-1)*perPage).Limit(perPage).Find(&bets)
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"items": bets, "total": total, "page": page, "per_page": perPage}})
 }
 
 func (h *Handler) GameResults(c *gin.Context) {
@@ -313,18 +407,29 @@ func (h *Handler) GameResults(c *gin.Context) {
 }
 
 func (h *Handler) GameHistory(c *gin.Context) {
-	// TODO: parse token → member_id → query bet history
-	ok(c, gin.H{"bets": []interface{}{}, "total": 0})
+	memberID := middleware.GetMemberID(c)
+	var bets []model.Bet
+	h.DB.Where("member_id = ? AND status IN ?", memberID, []string{"won", "lost"}).
+		Preload("BetType").Preload("LotteryRound").
+		Order("created_at DESC").Limit(50).Find(&bets)
+	ok(c, bets)
 }
 
 func (h *Handler) GameBalance(c *gin.Context) {
-	// TODO: parse token → member_id → get balance
-	ok(c, gin.H{"balance": 0})
+	memberID := middleware.GetMemberID(c)
+	var member model.Member
+	if err := h.DB.First(&member, memberID).Error; err != nil { fail(c, 404, "member not found"); return }
+	ok(c, gin.H{"balance": member.Balance})
 }
 
-// GameYeekeeWS — WebSocket endpoint
+// GameYeekeeWS — WebSocket endpoint สำหรับยี่กี
 // ⭐ ใช้ Hub เดียวกับ standalone (#3) → ws/yeekee_hub.go
-// ต่างแค่ auth: parse launch token แทน JWT
+// ต่างแค่ auth: launch token แทน JWT
 func (h *Handler) GameYeekeeWS(c *gin.Context) {
-	ok(c, gin.H{"message": "yeekee websocket — use Hub from ws package"})
+	// TODO: integrate WebSocket Hub (same as standalone #3)
+	// 1. Parse launch token → member_id
+	// 2. Upgrade to WebSocket
+	// 3. Create/get Hub for this round
+	// 4. Register client
+	ok(c, gin.H{"message": "yeekee websocket — TODO: integrate Hub"})
 }
