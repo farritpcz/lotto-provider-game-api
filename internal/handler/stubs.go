@@ -363,7 +363,7 @@ func (h *Handler) GamePlaceBets(c *gin.Context) {
 				if totalAfterBet > rule.ThresholdAmount {
 					switch rule.Action {
 					case "full_ban":
-						errors = append(errors, gin.H{"number": b.Number, "reason": "เกินยอดรับ (อั้นอัตโนมัติ)"})
+						errors = append(errors, gin.H{"number": b.Number, "reason": "เลขอั้น"})
 						autoBanned = true
 					case "reduce_rate":
 						if rule.ReducedRate > 0 { effectiveRate = rule.ReducedRate }
@@ -374,7 +374,7 @@ func (h *Handler) GamePlaceBets(c *gin.Context) {
 								round.ID, betType.ID, b.Number, memberID, "cancelled").
 							Select("COALESCE(SUM(amount), 0)").Scan(&personalTotal)
 						if personalTotal+b.Amount > rule.ThresholdAmount {
-							errors = append(errors, gin.H{"number": b.Number, "reason": "เกินยอดรับต่อคน"})
+							errors = append(errors, gin.H{"number": b.Number, "reason": "จำกัดยอด"})
 							autoBanned = true
 						}
 					}
