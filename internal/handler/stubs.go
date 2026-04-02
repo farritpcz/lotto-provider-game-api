@@ -342,6 +342,47 @@ func (h *Handler) GamePlaceBets(c *gin.Context) {
 				round.LotteryTypeID, betType.ID, "active").First(&rate)
 		}
 
+		// ⭐ เช็ค auto-ban rules — ขั้นบันได (จำกัดยอด/ลดเรท/อั้นเต็ม)
+		effectiveRate := rate.Rate
+		var autoBanRules []model.AutoBanRule
+		h.DB.Where("lottery_type_id = ? AND bet_type = ? AND status = ?",
+			round.LotteryTypeID, b.BetTypeCode, "active").
+			Order("threshold_amount ASC").
+			Find(&autoBanRules)
+
+		if len(autoBanRules) > 0 {
+			var totalForNumber float64
+			h.DB.Model(&model.Bet{}).
+				Where("lottery_round_id = ? AND bet_type_id = ? AND number = ? AND status != ?",
+					round.ID, betType.ID, b.Number, "cancelled").
+				Select("COALESCE(SUM(amount), 0)").Scan(&totalForNumber)
+
+			totalAfterBet := totalForNumber + b.Amount
+			autoBanned := false
+			for _, rule := range autoBanRules {
+				if totalAfterBet > rule.ThresholdAmount {
+					switch rule.Action {
+					case "full_ban":
+						errors = append(errors, gin.H{"number": b.Number, "reason": "เกินยอดรับ (อั้นอัตโนมัติ)"})
+						autoBanned = true
+					case "reduce_rate":
+						if rule.ReducedRate > 0 { effectiveRate = rule.ReducedRate }
+					case "max_amount":
+						var personalTotal float64
+						h.DB.Model(&model.Bet{}).
+							Where("lottery_round_id = ? AND bet_type_id = ? AND number = ? AND member_id = ? AND status != ?",
+								round.ID, betType.ID, b.Number, memberID, "cancelled").
+							Select("COALESCE(SUM(amount), 0)").Scan(&personalTotal)
+						if personalTotal+b.Amount > rule.ThresholdAmount {
+							errors = append(errors, gin.H{"number": b.Number, "reason": "เกินยอดรับต่อคน"})
+							autoBanned = true
+						}
+					}
+				}
+			}
+			if autoBanned { continue }
+		}
+
 		// เช็ค balance
 		if member.Balance < b.Amount {
 			errors = append(errors, gin.H{"number": b.Number, "reason": "insufficient balance"})
@@ -357,7 +398,7 @@ func (h *Handler) GamePlaceBets(c *gin.Context) {
 		}
 		member.Balance -= b.Amount
 
-		// สร้าง bet
+		// สร้าง bet (ใช้ effectiveRate ที่อาจถูกลดจาก auto-ban)
 		bet := model.Bet{
 			MemberID:       memberID,
 			OperatorID:     operatorID,
@@ -365,7 +406,7 @@ func (h *Handler) GamePlaceBets(c *gin.Context) {
 			BetTypeID:      betType.ID,
 			Number:         b.Number,
 			Amount:         b.Amount,
-			Rate:           rate.Rate,
+			Rate:           effectiveRate,
 			Status:         "pending",
 			CreatedAt:      time.Now(),
 		}
