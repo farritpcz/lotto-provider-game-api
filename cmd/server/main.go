@@ -19,6 +19,9 @@ import (
 
 	"github.com/farritpcz/lotto-provider-game-api/internal/config"
 	"github.com/farritpcz/lotto-provider-game-api/internal/handler"
+	"github.com/farritpcz/lotto-provider-game-api/internal/job"
+	"github.com/farritpcz/lotto-provider-game-api/internal/service"
+	"github.com/farritpcz/lotto-provider-game-api/internal/ws"
 )
 
 func main() {
@@ -42,13 +45,24 @@ func main() {
 	log.Println("✅ Connected to MySQL:", cfg.DBName)
 
 	// =================================================================
-	// สร้าง Router + Handler
+	// สร้าง Router + Handler + dependencies
 	// =================================================================
 	r := gin.Default()
 
+	hubManager := ws.NewHubManager()
+	yeekeeService := service.NewYeekeeService(db)
+
 	h := handler.NewHandler(cfg.LaunchTokenSecret)
-	h.DB = db // inject DB
+	h.DB = db
+	h.HubManager = hubManager
+	h.YeekeeService = yeekeeService
+	h.AllowedOrigins = cfg.AllowedOrigins
 	h.SetupRoutes(r)
+
+	// =================================================================
+	// Background jobs — yeekee cron (สร้างรอบ + ปิดรอบ + settle)
+	// =================================================================
+	job.StartYeekeeCron(db)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	log.Printf("🎰 lotto-provider-game-api starting on %s (env: %s)", addr, cfg.Env)

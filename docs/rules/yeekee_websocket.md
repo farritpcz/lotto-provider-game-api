@@ -1,8 +1,15 @@
 # Yeekee WebSocket — provider-game-api (#7)
 
-> Last updated: 2026-04-20 (v1 initial — starter rule, expand as feature matures)
-> Related code: `internal/ws/yeekee_hub.go`, `internal/job/yeekee_cron.go`, `internal/handler/router.go` (`WS /api/v1/game/yeekee/ws/:roundId`)
-> Status: WIP — hub มีแล้ว, integrate กับ lotto-core `betting.ValidateYeekeeShoot()`
+> Last updated: 2026-04-21 (v2 — WebSocket fully wired + cron settle)
+> Related code:
+>   - `internal/ws/yeekee_hub.go` — Hub + Client + ShootHandler type
+>   - `internal/ws/hub_manager.go` — HubManager (per-round lifecycle)
+>   - `internal/service/yeekee_service.go` — HandleShoot (ShootHandler impl)
+>   - `internal/handler/yeekee_ws.go` — GameYeekeeWS (upgrader + initial state)
+>   - `internal/job/yeekee_cron.go` — settleYeekeeRound (cron + payout trigger)
+>   - `internal/service/settle_service.go` — SettleRound (payout + credit + callback)
+>   - `internal/handler/router.go` — `WS /api/v1/game/yeekee/ws/:roundId`
+> Status: ✅ integrated (shoot validation, settle, seamless/transfer payout, operator callbacks)
 
 ## Purpose
 Real-time broadcast ให้ player ใน iframe (#8) เห็นเลขยิง/ผลรอบยี่กี — hub จัดการ connection pool per roundId
@@ -32,5 +39,18 @@ Real-time broadcast ให้ player ใน iframe (#8) เห็นเลขย
 - Cron: `internal/job/yeekee_cron.go` — เปิด/ปิดรอบอัตโนมัติ
 - Frontend: `lotto-provider-game-web/src/app/yeekee/room/` (และ `play/`)
 
+## Settlement flow (Tier B)
+1. Cron tick detects `yeekee_round.end_time <= now` + status='shooting'
+2. `settleYeekeeRound` → `yeekee.CalculateResult(shoots)` → update `yeekee_round.result_number` + `lottery_round.result_*`
+3. `service.SettleService.SettleRound(lottery_round_id, roundResult)`:
+   - load pending bets (preload BetType + Operator)
+   - `payout.SettleRound` → BetResult[] + summary
+   - update bet.status/win_amount/settled_at inside tx
+   - per-member payout — branch on `operator.wallet_type`:
+     * `transfer`: UPDATE members.balance + INSERT transaction
+     * `seamless`: `WalletService.SeamlessCredit` → operator callback URL
+4. After commit: fire `CallbackService.NotifyBetResult` for every bet (async, best-effort)
+
 ## Change Log
 - 2026-04-20: v1 initial skeleton
+- 2026-04-21: v2 — WebSocket + cron settle wired (Tier B). Hub lifecycle via HubManager. Payout supports both transfer and seamless wallet modes. Operator callbacks (bet-result + credit) fire post-commit.

@@ -1,8 +1,14 @@
 # Seamless Wallet — provider-game-api (#7)
 
-> Last updated: 2026-04-20 (v1 initial — starter rule, expand as feature matures)
-> Related code: `internal/handler/router.go` (operator group), `internal/handler/stubs.go` (SeamlessBalance/Debit/Credit, TransferDeposit/Withdraw), `internal/middleware/hmac.go` (HMACAuthWithDB), `internal/middleware/ratelimit.go`
-> Status: WIP — `SeamlessDebit` comment ระบุว่ายังทำเป็น transfer mode ("provider ไม่ได้เก็บเงินจริง — แค่ forward ให้ operator") จริง production ต้องเรียก operator API กลับ
+> Last updated: 2026-04-21 (v2 — seamless debit + settle-time credit + callbacks wired)
+> Related code:
+>   - `internal/handler/router.go` (operator group)
+>   - `internal/handler/stubs.go` — SeamlessBalance/Debit/Credit, TransferDeposit/Withdraw, GamePlaceBets (เพิ่ม branch seamless/transfer)
+>   - `internal/service/wallet_service.go` — WalletService (SeamlessBalance/Debit/Credit) + CallbackService (NotifyBetResult/NotifyRoundEvent)
+>   - `internal/service/settle_service.go` — SettleRound (payout per operator.wallet_type)
+>   - `internal/middleware/hmac.go` — HMACAuthWithDB
+>   - `internal/middleware/ratelimit.go`
+> Status: ✅ seamless mode active — GamePlaceBets branches on operator.wallet_type; settle payout uses SeamlessCredit for seamless operators, transfer otherwise
 
 ## Purpose
 Wallet API คล้าย PG/JILI — operator เรียกจาก server ของตัวเอง (HMAC signed) เพื่อเช็คยอด/หัก/เติม ให้กับ player (member ใน DB ของ provider)
@@ -36,5 +42,22 @@ Wallet API คล้าย PG/JILI — operator เรียกจาก server 
 - Config ของ key ถูกตั้งที่: `lotto-provider-backoffice-api` (#9) operator handlers
 - Callback URL ตั้งที่ operator-web `/callbacks`
 
+## Wallet mode resolution
+- `operators.wallet_type` = `'seamless'` | `'transfer'` (default from column definition)
+- **GamePlaceBets** (place bet):
+  - seamless → `WalletService.SeamlessDebit(op.CallbackURL, op.SecretKey, ...)` — operator เป็นคนหัก. `member.Balance` ใช้ค่าที่ operator ส่งกลับ
+  - transfer → UPDATE local `members.balance` (ต้องเช็ค `balance >= amount` + `RowsAffected > 0`)
+- **settle (yeekee cron + admin manual)**:
+  - seamless → `SeamlessCredit` (fire best-effort, log warn ถ้า HTTP fail — ไม่ rollback bet updates)
+  - transfer → UPDATE local balance + INSERT Transaction
+- **NotifyBetResult** — fire หลัง commit (async) ไปทุก bet รวม win และ lost (ให้ operator มีประวัติครบ)
+
+## Idempotency
+- `txn_id` — convention:
+  - debit:  `bet-{round_id}-{number}-{external_player_id}`
+  - credit: `win-{round_id}-{member_id}`
+- operator ควร dedupe ด้วย txn_id นี้ (TODO: provider ยังไม่ enforce replay-protection ด้วย local txn_id log)
+
 ## Change Log
 - 2026-04-20: v1 initial skeleton
+- 2026-04-21: v2 — seamless wallet wired end-to-end (Tier B). `GamePlaceBets` branches on `operator.wallet_type`. Settle payout via `SettleService` (transfer: local balance; seamless: SeamlessCredit). Callbacks fire post-commit.

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -39,6 +40,9 @@ type Config struct {
 	// Launch Token — สำหรับ player auth ใน game client (#8)
 	LaunchTokenSecret    string
 	LaunchTokenExpiryMin int // อายุ token (นาที)
+
+	// WebSocket allowed origins (comma-separated env: ALLOWED_ORIGINS)
+	AllowedOrigins []string
 }
 
 func Load() *Config {
@@ -59,7 +63,22 @@ func Load() *Config {
 
 		LaunchTokenSecret:    getEnv("LAUNCH_TOKEN_SECRET", "launch-secret-change-in-production"),
 		LaunchTokenExpiryMin: getEnvInt("LAUNCH_TOKEN_EXPIRY_MIN", 60),
+
+		AllowedOrigins: splitCSV(getEnv("ALLOWED_ORIGINS", "http://localhost:3002")),
 	}
+}
+
+// splitCSV แยก comma-separated string + trim whitespace + ตัดค่าว่าง
+func splitCSV(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func (c *Config) DSN() string {

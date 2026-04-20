@@ -17,6 +17,7 @@ import (
 	"github.com/farritpcz/lotto-core/httpx"
 	"github.com/farritpcz/lotto-provider-game-api/internal/middleware"
 	"github.com/farritpcz/lotto-provider-game-api/internal/model"
+	"github.com/farritpcz/lotto-provider-game-api/internal/service"
 )
 
 // Response helpers — thin wrappers over lotto-core/httpx (source of truth).
@@ -286,9 +287,11 @@ func (h *Handler) GameRounds(c *gin.Context) {
 
 // GamePlaceBets — ⭐ วางเดิมพันจาก game client
 // ใช้ logic คล้าย standalone (#3) แต่:
-//   - wallet: หักจาก provider balance (transfer) — AIDEV-TODO(farri, 2026-04-21): seamless API call (ดู docs/rules/seamless_wallet.md)
+//   - wallet: transfer mode → หักจาก provider balance (local); seamless mode → call operator API
 //   - scope: per operator_id
 //   - bans: เช็คทั้ง global + per-operator
+//
+// ⭐ seamless_wallet.md §7: provider ต้อง callback operator URL — ทำที่ debit + settle
 func (h *Handler) GamePlaceBets(c *gin.Context) {
 	memberID := middleware.GetMemberID(c)
 	operatorID := middleware.GetOperatorID(c)
@@ -306,6 +309,14 @@ func (h *Handler) GamePlaceBets(c *gin.Context) {
 
 	var member model.Member
 	if err := h.DB.First(&member, memberID).Error; err != nil { fail(c, 404, "member not found"); return }
+
+	// ⭐ โหลด operator ครั้งเดียว — ใช้กำหนด wallet mode (seamless/transfer)
+	var operator model.Operator
+	if err := h.DB.First(&operator, operatorID).Error; err != nil {
+		fail(c, 404, "operator not found"); return
+	}
+	isSeamless := operator.WalletType == "seamless"
+	walletService := service.NewWalletService()
 
 	successCount := 0
 	totalAmount := 0.0
@@ -382,20 +393,44 @@ func (h *Handler) GamePlaceBets(c *gin.Context) {
 			if autoBanned { continue }
 		}
 
-		// เช็ค balance
-		if member.Balance < b.Amount {
-			errors = append(errors, gin.H{"number": b.Number, "reason": "insufficient balance"})
-			break
+		// ⭐ หักเงิน — seamless หรือ transfer mode
+		if isSeamless {
+			// seamless: เรียก operator API (operator เป็นคนเก็บเงินจริง)
+			txnID := fmt.Sprintf("bet-%d-%s-%s", b.LotteryRoundID, b.Number, member.ExternalPlayerID)
+			resp, err := walletService.SeamlessDebit(operator.CallbackURL, operator.SecretKey, service.SeamlessDebitRequest{
+				PlayerID:    member.ExternalPlayerID,
+				Amount:      b.Amount,
+				Currency:    "THB",
+				TxnID:       txnID,
+				RoundID:     fmt.Sprintf("%d", b.LotteryRoundID),
+				Description: "วางเดิมพันหวย",
+			})
+			if err != nil {
+				reason := "seamless debit failed"
+				if resp != nil && resp.Message != "" {
+					reason = resp.Message
+				}
+				errors = append(errors, gin.H{"number": b.Number, "reason": reason})
+				break
+			}
+			// operator ส่ง balance หลังหักกลับมา
+			if resp != nil {
+				member.Balance = resp.Balance
+			}
+		} else {
+			// transfer: หักจาก provider DB
+			if member.Balance < b.Amount {
+				errors = append(errors, gin.H{"number": b.Number, "reason": "insufficient balance"})
+				break
+			}
+			result := tx.Model(&model.Member{}).Where("id = ? AND balance >= ?", memberID, b.Amount).
+				Update("balance", h.DB.Raw("balance - ?", b.Amount))
+			if result.RowsAffected == 0 {
+				errors = append(errors, gin.H{"number": b.Number, "reason": "debit failed"})
+				break
+			}
+			member.Balance -= b.Amount
 		}
-
-		// หักเงิน
-		result := tx.Model(&model.Member{}).Where("id = ? AND balance >= ?", memberID, b.Amount).
-			Update("balance", h.DB.Raw("balance - ?", b.Amount))
-		if result.RowsAffected == 0 {
-			errors = append(errors, gin.H{"number": b.Number, "reason": "debit failed"})
-			break
-		}
-		member.Balance -= b.Amount
 
 		// สร้าง bet (ใช้ effectiveRate ที่อาจถูกลดจาก auto-ban)
 		bet := model.Bet{
@@ -462,14 +497,4 @@ func (h *Handler) GameBalance(c *gin.Context) {
 	ok(c, gin.H{"balance": member.Balance})
 }
 
-// GameYeekeeWS — WebSocket endpoint สำหรับยี่กี
-// ⭐ ใช้ Hub เดียวกับ standalone (#3) → ws/yeekee_hub.go
-// ต่างแค่ auth: launch token แทน JWT
-func (h *Handler) GameYeekeeWS(c *gin.Context) {
-	// AIDEV-TODO(farri, 2026-04-21): integrate WebSocket Hub (ใช้ของ standalone #3)
-	// 1. Parse launch token → member_id
-	// 2. Upgrade to WebSocket
-	// 3. Create/get Hub for this round
-	// 4. Register client
-	ok(c, gin.H{"message": "yeekee websocket — not yet integrated"})
-}
+// GameYeekeeWS → ดู yeekee_ws.go (แยกไฟล์เพราะมี upgrader + initial state)

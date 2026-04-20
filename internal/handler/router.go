@@ -42,13 +42,22 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/farritpcz/lotto-provider-game-api/internal/middleware"
+	"github.com/farritpcz/lotto-provider-game-api/internal/service"
+	"github.com/farritpcz/lotto-provider-game-api/internal/ws"
 )
 
+// Handler — HTTP handler (shared across all endpoints)
+//
+// ⭐ dependencies ถูก inject จาก main.go หลังสร้าง — ต้อง set ให้ครบก่อน SetupRoutes
 type Handler struct {
 	LaunchTokenSecret string
 	DB                *gorm.DB // inject จาก main.go
-}
 
+	// WebSocket / yeekee deps (เพิ่มสำหรับ GameYeekeeWS)
+	HubManager     *ws.HubManager
+	YeekeeService  *service.YeekeeService
+	AllowedOrigins []string // สำหรับ wsUpgrader.CheckOrigin
+}
 
 func NewHandler(launchTokenSecret string) *Handler {
 	return &Handler{LaunchTokenSecret: launchTokenSecret}

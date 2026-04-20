@@ -26,6 +26,7 @@ import (
 	coreTypes "github.com/farritpcz/lotto-core/types"
 
 	"github.com/farritpcz/lotto-provider-game-api/internal/model"
+	"github.com/farritpcz/lotto-provider-game-api/internal/service"
 )
 
 // StartYeekeeCron เริ่ม cron job สำหรับยี่กี
@@ -157,7 +158,7 @@ func closeAndSettleExpiredRounds(db *gorm.DB, now time.Time) {
 //  1. ดึงเลขที่ยิงทั้งหมด
 //  2. lotto-core yeekee.CalculateResult() → ได้ผล
 //  3. บันทึกผลใน yeekee_round + lottery_round
-//  4. AIDEV-TODO(farri, 2026-04-21): trigger payout — pattern ตาม standalone yeekee_settle_handler.go
+//  4. trigger payout — ใช้ service.SettleService (เทียบ bets + จ่ายเงิน ตาม operator.wallet_type)
 func settleYeekeeRound(db *gorm.DB, yr model.YeekeeRound) {
 	log.Printf("🔄 Settling yeekee round %d (round_no: %d)...", yr.ID, yr.RoundNo)
 
@@ -217,9 +218,10 @@ func settleYeekeeRound(db *gorm.DB, yr model.YeekeeRound) {
 		"resulted_at":    &now,
 	})
 
-	// 7. AIDEV-TODO(farri, 2026-04-21): trigger payout — เทียบ bets + จ่ายเงิน
-	// เหมือน admin กรอกผลใน standalone-admin-api (ดู yeekee_settle_handler.go: settleYeekeeBets)
-	// ใช้ payout.SettleRound() + GroupWinnersByMember() + operator seamless callback
+	// 7. ⭐ trigger payout — เทียบ bets + จ่ายเงิน (transfer mode) / call operator (seamless)
+	settler := service.NewSettleService(db)
+	summary := settler.SettleRound(yr.LotteryRoundID, roundResult)
 
-	log.Printf("✅ Yeekee round %d settled!", yr.RoundNo)
+	log.Printf("✅ Yeekee round %d settled! winners=%d win=%.2f profit=%.2f",
+		yr.RoundNo, summary.TotalWinners, summary.TotalWinAmount, summary.Profit)
 }
