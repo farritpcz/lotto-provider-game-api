@@ -13,16 +13,15 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/farritpcz/lotto-core/httpx"
 	"github.com/farritpcz/lotto-provider-game-api/internal/middleware"
 	"github.com/farritpcz/lotto-provider-game-api/internal/model"
 )
 
-func ok(c *gin.Context, data interface{}) {
-	c.JSON(http.StatusOK, gin.H{"success": true, "data": data})
-}
-func fail(c *gin.Context, status int, msg string) {
-	c.JSON(status, gin.H{"success": false, "error": msg})
-}
+// Response helpers — thin wrappers over lotto-core/httpx (source of truth).
+func ok(c *gin.Context, data interface{})         { httpx.OK(c, data) }
+func fail(c *gin.Context, status int, msg string) { httpx.Fail(c, status, msg) }
 
 // =============================================================================
 // Operator API — Seamless Wallet

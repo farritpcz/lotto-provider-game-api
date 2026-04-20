@@ -3,7 +3,7 @@ module github.com/farritpcz/lotto-provider-game-api
 go 1.25.0
 
 require (
-	github.com/farritpcz/lotto-core v0.0.0-20260401092719-d467871f0260
+	github.com/farritpcz/lotto-core v0.4.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/gorilla/websocket v1.5.3
@@ -46,3 +46,5 @@ require (
 	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 )
+
+replace github.com/farritpcz/lotto-core => ../lotto-core
