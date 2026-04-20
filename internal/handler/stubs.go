@@ -286,7 +286,7 @@ func (h *Handler) GameRounds(c *gin.Context) {
 
 // GamePlaceBets — ⭐ วางเดิมพันจาก game client
 // ใช้ logic คล้าย standalone (#3) แต่:
-//   - wallet: หักจาก provider balance (transfer) — TODO: seamless API call
+//   - wallet: หักจาก provider balance (transfer) — AIDEV-TODO(farri, 2026-04-21): seamless API call (ดู docs/rules/seamless_wallet.md)
 //   - scope: per operator_id
 //   - bans: เช็คทั้ง global + per-operator
 func (h *Handler) GamePlaceBets(c *gin.Context) {
@@ -466,10 +466,10 @@ func (h *Handler) GameBalance(c *gin.Context) {
 // ⭐ ใช้ Hub เดียวกับ standalone (#3) → ws/yeekee_hub.go
 // ต่างแค่ auth: launch token แทน JWT
 func (h *Handler) GameYeekeeWS(c *gin.Context) {
-	// TODO: integrate WebSocket Hub (same as standalone #3)
+	// AIDEV-TODO(farri, 2026-04-21): integrate WebSocket Hub (ใช้ของ standalone #3)
 	// 1. Parse launch token → member_id
 	// 2. Upgrade to WebSocket
 	// 3. Create/get Hub for this round
 	// 4. Register client
-	ok(c, gin.H{"message": "yeekee websocket — TODO: integrate Hub"})
+	ok(c, gin.H{"message": "yeekee websocket — not yet integrated"})
 }

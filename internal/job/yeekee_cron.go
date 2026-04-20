@@ -157,7 +157,7 @@ func closeAndSettleExpiredRounds(db *gorm.DB, now time.Time) {
 //  1. ดึงเลขที่ยิงทั้งหมด
 //  2. lotto-core yeekee.CalculateResult() → ได้ผล
 //  3. บันทึกผลใน yeekee_round + lottery_round
-//  4. TODO: trigger payout (เหมือน admin กรอกผล)
+//  4. AIDEV-TODO(farri, 2026-04-21): trigger payout — pattern ตาม standalone yeekee_settle_handler.go
 func settleYeekeeRound(db *gorm.DB, yr model.YeekeeRound) {
 	log.Printf("🔄 Settling yeekee round %d (round_no: %d)...", yr.ID, yr.RoundNo)
 
@@ -217,9 +217,9 @@ func settleYeekeeRound(db *gorm.DB, yr model.YeekeeRound) {
 		"resulted_at":    &now,
 	})
 
-	// 7. ⭐ TODO: trigger payout — เทียบ bets + จ่ายเงิน
-	// เหมือน admin กรอกผลใน standalone-admin-api (#5)
-	// ใช้ payout.SettleRound() + GroupWinnersByMember()
+	// 7. AIDEV-TODO(farri, 2026-04-21): trigger payout — เทียบ bets + จ่ายเงิน
+	// เหมือน admin กรอกผลใน standalone-admin-api (ดู yeekee_settle_handler.go: settleYeekeeBets)
+	// ใช้ payout.SettleRound() + GroupWinnersByMember() + operator seamless callback
 
 	log.Printf("✅ Yeekee round %d settled!", yr.RoundNo)
 }
