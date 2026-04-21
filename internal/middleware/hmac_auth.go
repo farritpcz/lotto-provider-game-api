@@ -119,6 +119,14 @@ func HMACAuthWithDB(db *gorm.DB) gin.HandlerFunc {
 				c.Abort()
 				return
 			}
+
+			// ⭐ 6. Replay protection — ถ้าเห็น signature นี้แล้วใน 5 นาที → reject
+			//    (นอกเหนือจาก timestamp window — ป้องกัน sniff + replay ภายใน window)
+			if !CheckNonce(apiKey, signature, timestamp) {
+				c.JSON(http.StatusUnauthorized, gin.H{"success": false, "error": "replay detected (signature already used)"})
+				c.Abort()
+				return
+			}
 		}
 
 		// Set operator info ใน context ให้ handler ใช้

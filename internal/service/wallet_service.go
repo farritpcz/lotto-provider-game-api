@@ -23,19 +23,34 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
+
+	"gorm.io/gorm"
+
+	"github.com/farritpcz/lotto-provider-game-api/internal/model"
 )
 
 // WalletService จัดการ wallet กับ operator
 type WalletService struct {
 	httpClient *http.Client
+	db         *gorm.DB // ⭐ optional — ถ้า set จะเปิดใช้ idempotency store
 }
 
-// NewWalletService สร้าง WalletService instance
+// NewWalletService สร้าง WalletService instance (ไม่มี idempotency store)
 func NewWalletService() *WalletService {
 	return &WalletService{
 		httpClient: &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+// NewWalletServiceWithDB สร้าง WalletService พร้อม idempotency store
+// ⭐ production ต้องใช้ตัวนี้ — ป้องกัน double-debit/credit จาก retry
+func NewWalletServiceWithDB(db *gorm.DB) *WalletService {
+	return &WalletService{
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		db:         db,
 	}
 }
 
@@ -89,15 +104,100 @@ func (s *WalletService) SeamlessBalance(callbackURL string, secretKey string, re
 //
 // Flow: ลูกค้าแทง → provider debit → operator หักเงินจาก player
 // ถ้า operator return success=false → แทงไม่สำเร็จ (ยอดไม่พอ)
-func (s *WalletService) SeamlessDebit(callbackURL string, secretKey string, req SeamlessDebitRequest) (*WalletResponse, error) {
-	return s.callOperator(callbackURL+"/wallet/debit", secretKey, req)
+//
+// ⭐ Idempotent: ถ้า txn_id เคย success แล้ว → return cached response ไม่ call operator อีก
+func (s *WalletService) SeamlessDebit(callbackURL string, secretKey string, req SeamlessDebitRequest, operatorID int64) (*WalletResponse, error) {
+	return s.seamlessCallIdempotent(callbackURL+"/wallet/debit", secretKey, req.TxnID, operatorID, "debit", req.PlayerID, req.Amount, req.RoundID, req)
 }
 
 // SeamlessCredit เติมเงินกลับ operator (ตอนชนะรางวัล)
 //
 // Flow: ออกผล → ลูกค้าชนะ → provider credit → operator เพิ่มเงินให้ player
-func (s *WalletService) SeamlessCredit(callbackURL string, secretKey string, req SeamlessCreditRequest) (*WalletResponse, error) {
-	return s.callOperator(callbackURL+"/wallet/credit", secretKey, req)
+//
+// ⭐ Idempotent: ถ้า txn_id เคย success แล้ว → return cached response
+func (s *WalletService) SeamlessCredit(callbackURL string, secretKey string, req SeamlessCreditRequest, operatorID int64) (*WalletResponse, error) {
+	return s.seamlessCallIdempotent(callbackURL+"/wallet/credit", secretKey, req.TxnID, operatorID, "credit", req.PlayerID, req.Amount, req.RoundID, req)
+}
+
+// seamlessCallIdempotent — core wrapper ที่เช็ค seamless_txn_log ก่อน call operator
+//
+// Flow:
+//  1. ถ้า db == nil → ผ่าน idempotency (legacy path) — call operator ตรงๆ
+//  2. INSERT seamless_txn_log(txn_id, ...) status=pending
+//  3. ถ้า INSERT fail (duplicate) → ดึง row เดิม:
+//     - ถ้า status=success → return cached response (ไม่ call อีก)
+//     - ถ้า status=pending → return error (concurrent request — operator อาจ process อยู่)
+//     - ถ้า status=failed → update → retry call
+//  4. Call operator
+//  5. Update row status + response_body + completed_at
+func (s *WalletService) seamlessCallIdempotent(url, secretKey, txnID string, operatorID int64, direction, playerID string, amount float64, roundID string, payload interface{}) (*WalletResponse, error) {
+	// Legacy path: ไม่มี db → call ตรงๆ (unit tests / minimal setups)
+	if s.db == nil {
+		return callOperatorAPI(s.httpClient, url, secretKey, payload)
+	}
+	if txnID == "" {
+		return nil, errors.New("seamless: txn_id required for idempotent call")
+	}
+
+	// Step 1+2: พยายาม INSERT row ใหม่
+	logRow := model.SeamlessTxnLog{
+		TxnID:      txnID,
+		OperatorID: operatorID,
+		Direction:  direction,
+		PlayerID:   playerID,
+		Amount:     amount,
+		RoundID:    roundID,
+		Status:     "pending",
+	}
+	err := s.db.Create(&logRow).Error
+	if err != nil {
+		// อาจซ้ำ — ลองดึง row เดิม
+		var existing model.SeamlessTxnLog
+		if findErr := s.db.Where("txn_id = ?", txnID).First(&existing).Error; findErr != nil {
+			return nil, fmt.Errorf("seamless: insert failed and cannot lookup existing: %w", err)
+		}
+		if existing.Status == "success" {
+			// ⭐ idempotent hit — ใช้ cached response
+			log.Printf("🔁 [seamless] idempotent hit txn=%s (cached)", txnID)
+			var cached WalletResponse
+			if existing.ResponseBody != "" {
+				_ = json.Unmarshal([]byte(existing.ResponseBody), &cached)
+			}
+			cached.Success = true
+			return &cached, nil
+		}
+		if existing.Status == "pending" {
+			return nil, fmt.Errorf("seamless: txn %s still pending (concurrent call?)", txnID)
+		}
+		// status=failed → reset to pending และ retry call
+		s.db.Model(&existing).Updates(map[string]interface{}{
+			"status":        "pending",
+			"error_message": "",
+		})
+	}
+
+	// Step 4: Call operator
+	resp, callErr := callOperatorAPI(s.httpClient, url, secretKey, payload)
+
+	// Step 5: อัพเดท log row
+	now := time.Now()
+	if callErr != nil {
+		s.db.Model(&model.SeamlessTxnLog{}).Where("txn_id = ?", txnID).Updates(map[string]interface{}{
+			"status":        "failed",
+			"error_message": callErr.Error(),
+			"completed_at":  &now,
+		})
+		return resp, callErr
+	}
+
+	// success — เก็บ response body สำหรับ replay
+	respJSON, _ := json.Marshal(resp)
+	s.db.Model(&model.SeamlessTxnLog{}).Where("txn_id = ?", txnID).Updates(map[string]interface{}{
+		"status":        "success",
+		"response_body": string(respJSON),
+		"completed_at":  &now,
+	})
+	return resp, nil
 }
 
 // =============================================================================

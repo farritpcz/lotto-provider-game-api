@@ -404,7 +404,7 @@ func (h *Handler) GamePlaceBets(c *gin.Context) {
 				TxnID:       txnID,
 				RoundID:     fmt.Sprintf("%d", b.LotteryRoundID),
 				Description: "วางเดิมพันหวย",
-			})
+			}, operator.ID)
 			if err != nil {
 				reason := "seamless debit failed"
 				if resp != nil && resp.Message != "" {

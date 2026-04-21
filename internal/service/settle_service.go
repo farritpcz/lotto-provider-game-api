@@ -276,9 +276,30 @@ func (s *SettleService) creditSeamless(m model.Member, amount float64, lotteryRo
 		RoundID:     fmt.Sprintf("%d", lotteryRoundID),
 		Description: "ชนะรางวัลหวย",
 	}
-	if _, err := s.wallet.SeamlessCredit(m.Operator.CallbackURL, m.Operator.SecretKey, req); err != nil {
-		log.Printf("⚠️ [settle/seamless] credit failed member=%d op=%d amount=%.2f: %v",
+	if _, err := s.wallet.SeamlessCredit(m.Operator.CallbackURL, m.Operator.SecretKey, req, m.OperatorID); err != nil {
+		log.Printf("⚠️ [settle/seamless] credit failed member=%d op=%d amount=%.2f: %v — enqueueing retry",
 			m.ID, m.OperatorID, amount, err)
+		// ⭐ F-2: push ลง retries queue สำหรับ reconciler retry
+		s.enqueueSeamlessRetry(m, amount, lotteryRoundID, req, err)
+	}
+}
+
+// enqueueSeamlessRetry — ถ้า SeamlessCredit fail → push เข้า queue ให้ cron ลอง retry
+// No-op ถ้า row ซ้ำ (unique index on txn_id)
+func (s *SettleService) enqueueSeamlessRetry(m model.Member, amount float64, roundID int64, req SeamlessCreditRequest, lastErr error) {
+	retry := model.SeamlessCreditRetry{
+		TxnID:       req.TxnID,
+		OperatorID:  m.OperatorID,
+		PlayerID:    req.PlayerID,
+		Amount:      amount,
+		RoundID:     req.RoundID,
+		Description: req.Description,
+		Status:      "pending",
+		LastError:   lastErr.Error(),
+		NextRetryAt: time.Now().Add(30 * time.Second),
+	}
+	if err := s.db.Create(&retry).Error; err != nil {
+		log.Printf("⚠️ [settle/seamless] failed to enqueue retry txn=%s: %v", req.TxnID, err)
 	}
 }
 

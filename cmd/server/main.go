@@ -61,8 +61,10 @@ func main() {
 
 	// =================================================================
 	// Background jobs — yeekee cron (สร้างรอบ + ปิดรอบ + settle)
+	//                   seamless reconciler (retry failed credits)
 	// =================================================================
 	job.StartYeekeeCron(db)
+	job.StartSeamlessReconciler(db) // ⭐ F-2: retry SeamlessCredit ที่ fail
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	log.Printf("🎰 lotto-provider-game-api starting on %s (env: %s)", addr, cfg.Env)
